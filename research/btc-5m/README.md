@@ -86,6 +86,12 @@ price that old. On the real tape, the market's last trade is a *better* forecast
 model (Brier 0.151 vs 0.174), and the model's apparent 9c edge shrinks to zero once you
 must fill at the next real print.
 
+Most v3 entries came in the first seconds of a window, where the model's "start price" (a
+Binance/Hyperliquid print) differs from Chainlink's. Forbidding entries before 30 / 60 /
+120 s (`tape_backtest.py 0.05 1 <seconds>`) gives −0.003 / +0.009 / −0.015 $/share, all
+with CIs spanning zero. The model keeps "seeing" ~10c of edge that never pays: the
+market is pricing information the model does not have.
+
 The same trap is documented independently in `emoubarak/polymarket-updown-lab`
 (`research/FINDINGS.md`: "prices-history is median 56 s stale"; "directional edge =
 temporal lookahead artifact").

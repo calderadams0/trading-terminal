@@ -12,7 +12,7 @@ Here, for each window:
                     plus the taker fee. A print someone else actually got is the best
                     case for us, so this still flatters — but not by a minute.
 
-Usage:  python3 research/btc-5m/polybot/tape_backtest.py [min_edge=0.05] [latency_s=1]
+Usage:  python3 research/btc-5m/polybot/tape_backtest.py [min_edge=0.05] [latency_s=1] [min_elapsed_s=0]
 Writes: research/btc-5m/out/polybot_tape_backtest.md
 """
 
@@ -67,6 +67,7 @@ def tape(t0: int) -> list[tuple[int, float]] | None:
 def main() -> None:
     min_edge = float(sys.argv[1]) if len(sys.argv) > 1 else 0.05
     latency = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    min_elapsed = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     sec = binance_1s(3)
     windows = load_windows(min(sec) + 3600, max(sec) - 300)
     print(f"loading tapes for {len(windows)} windows…", flush=True)
@@ -91,7 +92,7 @@ def main() -> None:
                 continue
             fair = core.fair_up(s_open, s_now, t0 + 300 - ts, sig)
             brier.append(((u - y) ** 2, (fair - y) ** 2))
-            if done:
+            if done or ts - t0 < min_elapsed:
                 continue
             d = core.decide(fair, u, 1 - u, min_edge)
             if not d.side:
@@ -112,7 +113,8 @@ def main() -> None:
     md = ["# Polymarket BTC 5m — fair-value backtest on the real trade tape\n",
           f"Windows: {len(windows)}; with a tape: {sum(1 for v in tapes.values() if v)}; "
           f"trades in tapes: {sum(len(v) for v in tapes.values() if v):,}.\n",
-          f"Rule: min edge {min_edge:.2f} $/share after fee; fill = next real print ≥ {latency}s later.\n"]
+          f"Rule: min edge {min_edge:.2f} $/share after fee; no entry before {min_elapsed}s; "
+          f"fill = next real print ≥ {latency}s later.\n"]
     if brier:
         md.append(f"Brier score at every tape print — last trade price: **{sum(a for a, _ in brier) / len(brier):.4f}**, "
                   f"our fair value: **{sum(b for _, b in brier) / len(brier):.4f}** (lower is better; n={len(brier):,}).\n")
