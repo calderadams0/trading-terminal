@@ -6,7 +6,9 @@ lookahead artifact (we measured +7..+10 c/share of fake edge; see README.md).
 
 Here, for each window:
   - market price  = the last real trade (Data API v2 /trades), converted to an Up price
-  - BTC price     = Binance 1s close of the second before that trade
+  - start price   = Polymarket's published priceToBeat (Chainlink), not an exchange's
+  - BTC price     = Binance 1s close of the second before that trade, shifted by the median
+                    Binance-minus-Chainlink gap over the previous 30 minutes
   - decision      = core.decide() on that pair, at most once per second
   - fill          = the price of the next real trade on our side >= LATENCY s later,
                     plus the taker fee. A print someone else actually got is the best
@@ -30,6 +32,22 @@ import core  # noqa: E402
 from backtest import DATA, OUT, binance_1s, get, load_windows, price_at, sigma_before  # noqa: E402
 
 TAPES = DATA / "tapes"
+PTB = DATA / "price_to_beat.json"
+
+
+def price_to_beat(t0s: list[int]) -> dict[int, float]:
+    """Polymarket's published Chainlink start price per window (eventMetadata.priceToBeat)."""
+    have = {int(k): v for k, v in json.loads(PTB.read_text()).items()} if PTB.exists() else {}
+
+    def one(t: int) -> tuple[int, float | None]:
+        ev = json.loads(get(f"https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{t}"))
+        return t, (ev[0].get("eventMetadata") or {}).get("priceToBeat") if ev else None
+
+    todo = [t for t in t0s if have.get(t) is None]
+    with ThreadPoolExecutor(8) as ex:
+        have.update(dict(ex.map(one, todo)))
+    PTB.write_text(json.dumps({str(k): v for k, v in have.items()}))
+    return {t: v for t, v in have.items() if v is not None}
 
 
 def condition_id(t0: int) -> str | None:
@@ -71,14 +89,23 @@ def main() -> None:
     sec = binance_1s(3)
     windows = load_windows(min(sec) + 3600, max(sec) - 300)
     print(f"loading tapes for {len(windows)} windows…", flush=True)
+    ptb = price_to_beat([w["t0"] for w in windows])
     with ThreadPoolExecutor(8) as ex:
         tapes = dict(zip([w["t0"] for w in windows], ex.map(tape, [w["t0"] for w in windows])))
 
     trades, placebo, brier = [], [], []
     for w in windows:
         t0, tp = w["t0"], tapes.get(w["t0"])
-        s_open, sig = sec.get(t0, (None,))[0], sigma_before(sec, t0)
-        if not tp or s_open is None or sig is None:
+        # Start price = Chainlink's (priceToBeat). Binance is only used for the path after
+        # the open, shifted by this window's Binance-minus-Chainlink gap at the open.
+        b_open, sig, s_open = sec.get(t0, (None,))[0], sigma_before(sec, t0), ptb.get(t0)
+        if not tp or s_open is None or b_open is None or sig is None:
+            continue
+        # The gap is measured over the previous 30 minutes of opens, not at this open:
+        # Chainlink lags the exchanges by seconds, so an instantaneous gap would bake a
+        # move that Chainlink has not printed yet into the "start price".
+        prev = [sec[t][0] - ptb[t] for t in range(t0 - 1800, t0, 300) if t in sec and t in ptb]
+        if len(prev) < 3:
             continue
         y = 1.0 if w["up_won"] else 0.0
         inside = [(ts, u) for ts, u in tp if t0 < ts <= t0 + 290]
@@ -87,9 +114,10 @@ def main() -> None:
             if ts == last_sec:
                 continue
             last_sec = ts
-            s_now = price_at(sec, ts - 1)
-            if s_now is None:
+            b_now = price_at(sec, ts - 1)
+            if b_now is None:
                 continue
+            s_now = b_now - sorted(prev)[len(prev) // 2]
             fair = core.fair_up(s_open, s_now, t0 + 300 - ts, sig)
             brier.append(((u - y) ** 2, (fair - y) ** 2))
             if done or ts - t0 < min_elapsed:

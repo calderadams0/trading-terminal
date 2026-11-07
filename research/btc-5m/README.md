@@ -19,7 +19,9 @@ backtest_freqtrade.py       …backtested in real Freqtrade, train and held-out 
 polybot/core.py             Part 3 — fair value, Polymarket fee, decision rule (shared)
 polybot/backtest.py         …on CLOB price history  ← flattering; kept as a cautionary tale
 polybot/tape_backtest.py    …on the real trade tape ← the honest one
+polybot/chainlink.py        …live Chainlink BTC/USD, the settlement price
 polybot/paper.py            …live paper trading against the real order book
+polybot/summary.py          …is the paper log's P&L clear of zero yet?
 ```
 
 Data and reports land in `data/` and `out/` (git-ignored).
@@ -78,6 +80,7 @@ the same 850 windows; v1, an earlier draft priced off Hyperliquid 1m candles, us
 | v1 (early draft), minute boundaries | CLOB `prices-history`, ~1/min | +0.12 | artifact |
 | v2 `backtest.py`, at each history point, BTC 1 s before | same | +0.07 to +0.11 | artifact |
 | v3 `tape_backtest.py`, at each real trade, fill on the next print ≥ 1 s later | 1.4 M executed trades | **+0.003 (CI −0.029 to +0.036)** | **no edge** |
+| v3 + Chainlink start price and lead-adjusted "now" (current `tape_backtest.py`) | same | **+0.013 (CI −0.019 to +0.046)** | **no edge** |
 
 Why v1 and v2 lie: a `prices-history` point is not the market *at* its timestamp. Sampling
 the live book every 5 s and comparing, the history lagged it by **5–115 seconds** (one
@@ -86,20 +89,52 @@ price that old. On the real tape, the market's last trade is a *better* forecast
 model (Brier 0.151 vs 0.174), and the model's apparent 9c edge shrinks to zero once you
 must fill at the next real print.
 
-Most v3 entries came in the first seconds of a window, where the model's "start price" (a
-Binance/Hyperliquid print) differs from Chainlink's. Forbidding entries before 30 / 60 /
-120 s (`tape_backtest.py 0.05 1 <seconds>`) gives −0.003 / +0.009 / −0.015 $/share, all
-with CIs spanning zero. The model keeps "seeing" ~10c of edge that never pays: the
-market is pricing information the model does not have.
+Most v3 entries came in the first seconds of a window. Forbidding entries before 30 / 60 /
+120 s (`tape_backtest.py 0.05 1 <seconds>`) gave −0.003 / +0.009 / −0.015 $/share, all
+with CIs spanning zero.
+
+**Pricing off Chainlink.** These markets settle on Chainlink BTC/USD, which on
+2026-11-07 sat ~$103 below Binance and ~$88 below Hyperliquid, drifting ~$21 between
+windows. A *constant* gap cancels out of the model (it uses the ratio now/open). What
+does not cancel is that Chainlink **trails** the exchanges by seconds, so the
+exchange price now is a forecast of where Chainlink is about to print. `tape_backtest.py`
+now uses Polymarket's published `priceToBeat` as the start price and the exchange price
+minus the median gap of the previous 30 minutes as "now". That makes the model
+noticeably better calibrated (Brier 0.174 → **0.159**) — but still worse than the
+market's own last trade (0.151), and the P&L is still indistinguishable from zero:
+**+0.013 $/share (CI −0.019 to +0.046)** with no entry delay, −0.009 (CI −0.040 to
++0.022) with 30 s. The market already knows what the model knows, and a bit more.
 
 The same trap is documented independently in `emoubarak/polymarket-updown-lab`
 (`research/FINDINGS.md`: "prices-history is median 56 s stale"; "directional edge =
 temporal lookahead artifact").
 
 `polybot/paper.py` runs the rule live against the **real best ask**, which cannot be
-stale, and logs to `out/paper_trades.csv`. That forward log — hundreds of windows, not a
-handful — is the only number worth trusting before any real money. From a cloud box the
-bot is also seconds slower than co-located competitors, which costs more edge, not less.
+stale, and logs to `out/paper_trades.csv`. It prices off **live Chainlink BTC/USD**
+(`polybot/chainlink.py`, Polymarket's public relay of the settlement feed), takes the
+window's start price from it, and decides on the lead-adjusted price once it has five
+minutes of Hyperliquid-minus-Chainlink gap samples. Each resolved row also records
+Polymarket's published `priceToBeat`, so the start price is checked, not assumed.
+
+That forward log — hundreds of windows, not a handful — is the only number worth
+trusting before any real money. From a cloud box the bot is also seconds slower than
+co-located competitors, which costs more edge, not less.
+
+### Running it for weeks
+
+A cloud session's container is temporary, so run it on a machine that stays on (your
+own computer or a small VPS). It needs outbound HTTPS/WSS to `gamma-api.polymarket.com`,
+`clob.polymarket.com`, `ws-live-data.polymarket.com` and `api.hyperliquid.xyz`.
+
+```bash
+pip install -r research/btc-5m/requirements.txt
+# 14 days, $10 paper stake, 5c min edge, no entries in a window's first 10 s
+nohup python3 research/btc-5m/polybot/paper.py 20160 0.05 10 10 >> paper.log 2>&1 &
+python3 research/btc-5m/polybot/summary.py      # any time: P&L, 95% CI, verdict
+```
+
+The log appends across restarts. ~288 windows a day; a few hundred trades is the least
+that can tell a 2c edge from zero.
 
 ## Public "polybots" on GitHub (checked 2026-11-07)
 
