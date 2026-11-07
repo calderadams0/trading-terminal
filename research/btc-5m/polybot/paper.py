@@ -134,7 +134,9 @@ def main() -> None:
                 tokens = json.loads(e["markets"][0]["clobTokenIds"]) if e else []
                 sig = feed.sigma_per_sqrt_s() or hl_sigma()
             if t0 and s_open is None and not skipped:
-                s_open = feed.at(t0, tolerance=1)
+                # Wait for the print stamped exactly at the open; it can arrive a second or
+                # two late. Only after 5 s accept a neighbouring second.
+                s_open = feed.at(t0, tolerance=0 if now - t0 < 5 else 1)
                 if s_open is not None:
                     print(f"[{time.strftime('%H:%M:%S')}] window {t0}: Chainlink open {s_open:.2f}, "
                           f"vol {sig * math.sqrt(300) * 100:.3f}%/5m "
